@@ -4106,13 +4106,9 @@ function evaluatePixel(s) {
                 ].map(v => +v.toFixed(6));
                 const idx = this.indices[indice];
 
-                // Expand window ±3 days to guarantee tile coverage
-                const d0 = new Date(fecha+'T00:00:00Z');
-                const d1 = new Date(fecha+'T23:59:59Z');
-                d0.setDate(d0.getDate() - 3);
-                d1.setDate(d1.getDate() + 3);
-                const t0 = d0.toISOString().replace(/\.\d{3}Z$/, 'Z');
-                const t1 = d1.toISOString().replace(/\.\d{3}Z$/, 'Z');
+                // Use exact date — no expansion so each date returns its own stats
+                const t0 = fecha + 'T00:00:00Z';
+                const t1 = fecha + 'T23:59:59Z';
 
                 // Statistics API requires a different evalscript format than Process API:
                 // output must have id:"default" and bands must have id:"B0"
@@ -4138,7 +4134,7 @@ function evaluatePixel(s) {
                     },
                     aggregation: {
                         timeRange: {from:t0, to:t1},
-                        aggregationInterval: { of: 'P5D' },
+                        aggregationInterval: { of: 'P1D' },
                         evalscript: statsEvalscript,
                         resx: resFinal,
                         resy: resFinal
@@ -4161,8 +4157,25 @@ function evaluatePixel(s) {
                     const errTxt = await resp.text().catch(() => '');
                     throw new Error(`Statistics API HTTP ${resp.status}: ${errTxt.substring(0,400)}`);
                 }
-                const data = await resp.json();
+                let data = await resp.json();
                 console.log('Statistics raw:', JSON.stringify(data).substring(0,600));
+
+                // If exact date has no data, retry with ±2 day window
+                if (!data.data?.length || !data.data.some(iv => iv.outputs && Object.keys(iv.outputs).length > 0)) {
+                    const d0b = new Date(fecha+'T00:00:00Z'); d0b.setDate(d0b.getDate()-2);
+                    const d1b = new Date(fecha+'T23:59:59Z'); d1b.setDate(d1b.getDate()+2);
+                    const t0b = d0b.toISOString().replace(/\.\d{3}Z$/,'Z');
+                    const t1b = d1b.toISOString().replace(/\.\d{3}Z$/,'Z');
+                    const body2 = JSON.parse(JSON.stringify(body));
+                    body2.aggregation.timeRange = {from:t0b, to:t1b};
+                    body2.input.data[0].dataFilter.timeRange = {from:t0b, to:t1b};
+                    const resp2 = await fetch('https://sh.dataspace.copernicus.eu/api/v1/statistics', {
+                        method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},
+                        body: JSON.stringify(body2)
+                    });
+                    if (resp2.ok) data = await resp2.json();
+                    console.log('Statistics retry (±2d):', JSON.stringify(data).substring(0,300));
+                }
 
                 // Pick first interval that has actual outputs
                 const intervals = data.data || [];
@@ -4689,92 +4702,101 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
             // ─── Histograma Chart.js ──────────────────────────────────
             dibujarHistograma(stats, indice, fecha) {
                 const idx = this.indices[indice];
-                document.getElementById('vegHistogramaContainer').style.display = 'none';
+                const cont = document.getElementById('vegHistogramaContainer');
                 const canvas = document.getElementById('vegHistogramaChart');
+                cont.style.display = 'none';
                 canvas.style.display = 'block';
-                if (this.histogramaChart) { this.histogramaChart.destroy(); this.histogramaChart=null; }
+                if (this.histogramaChart) { this.histogramaChart.destroy(); this.histogramaChart = null; }
 
-                if (!stats.histogram) {
+                const h = stats?.histogram;
+                if (!h || !h.bins?.length) {
                     canvas.style.display = 'none';
-                    document.getElementById('vegHistogramaContainer').innerHTML =
-                        '<p style="padding:2rem;text-align:center;color:var(--text-secondary);">Sin datos de histograma para esta fecha</p>';
-                    document.getElementById('vegHistogramaContainer').style.display = 'flex';
+                    cont.innerHTML = '<p style="padding:2rem;text-align:center;color:var(--text-secondary);">Sin datos de histograma</p>';
+                    cont.style.display = 'flex';
                     return;
                 }
 
-                const {bins, counts} = stats.histogram;
-                const isPercent = stats.histogram.isPercent === true;
-                const labels = bins.map(b => b.toFixed(3));
-                const colors = bins.map(b => {
-                    const e = idx.escala.find(s => b>=s.rango[0] && b<s.rango[1]) || idx.escala[idx.escala.length-1];
+                // ── Pad bins to always span idx.min → idx.max (e.g. -1 to 1) ──
+                const step = h.bins.length > 1 ? h.bins[1] - h.bins[0] : 0.05;
+                const allBins = [], allCounts = [];
+                // Leading zeros from idx.min to first real bin
+                for (let v = idx.min; v < h.bins[0] - step * 0.5; v = +(v + step).toFixed(4)) {
+                    allBins.push(+v.toFixed(4)); allCounts.push(0);
+                }
+                h.bins.forEach((b, i) => { allBins.push(b); allCounts.push(h.counts[i]); });
+                // Trailing zeros from last real bin to idx.max
+                const lastBin = allBins[allBins.length - 1];
+                for (let v = +(lastBin + step).toFixed(4); v <= idx.max + step * 0.5; v = +(v + step).toFixed(4)) {
+                    allBins.push(+v.toFixed(4)); allCounts.push(0);
+                }
+
+                const fechaLabel = new Date(fecha + 'T12:00:00Z')
+                    .toLocaleDateString('es-AR', {day:'numeric', month:'short', year:'numeric'});
+
+                // Colors per bin based on index scale
+                const colors = allBins.map(b => {
+                    const e = idx.escala.find(s => b >= s.rango[0] && b < s.rango[1]) || idx.escala[idx.escala.length-1];
                     return e.color + 'cc';
                 });
 
-                const fechaLabel = new Date(fecha+'T12:00:00Z')
-                    .toLocaleDateString('es-AR',{day:'numeric',month:'short',year:'numeric'});
-                const maxCount = Math.max(...counts);
+                // Media & mediana vertical lines
+                const maxH = Math.max(...allCounts, 0.1);
+                const nearestIdx = v => allBins.reduce((best, b, i) =>
+                    Math.abs(b - v) < Math.abs(allBins[best] - v) ? i : best, 0);
+                const mediaData  = allBins.map((_, i) => i === nearestIdx(stats.media)   ? maxH * 1.1 : null);
+                const medianaData = allBins.map((_, i) => i === nearestIdx(stats.mediana) ? maxH * 0.9 : null);
 
-                // Vertical reference lines for media and mediana
-                const findBinIdx = v => {
-                    let best=0, bestD=Infinity;
-                    bins.forEach((b,i)=>{ const d=Math.abs(b-v); if(d<bestD){bestD=d;best=i;} });
-                    return best;
-                };
-                const mediaLine   = bins.map((_,i) => i===findBinIdx(stats.media)   ? maxCount*1.08 : null);
-                const medianaLine = bins.map((_,i) => i===findBinIdx(stats.mediana) ? maxCount*0.88 : null);
-
-                const yLabel = isPercent ? 'Porcentaje de píxeles (%)' : 'Número de píxeles';
-                const yCallback = isPercent
-                    ? v => v.toFixed(1) + '%'
-                    : v => v >= 1000 ? (v/1000).toFixed(1)+'k' : v;
-                const tooltipLabel = isPercent
-                    ? item => item.datasetIndex===0 ? `Frecuencia: ${(item.raw||0).toFixed(1)}%` : item.dataset.label
-                    : item => item.datasetIndex===0 ? `Píxeles: ${(item.raw||0).toLocaleString('es-AR')}` : item.dataset.label;
+                // X ticks: show every 0.2 (or appropriate step for non-NDVI indices)
+                const tickStep = (idx.max - idx.min) / 10;
+                const xLabels = allBins.map(b => {
+                    const distToRound = Math.abs(b - Math.round(b / tickStep) * tickStep);
+                    return distToRound < step * 0.6 ? b.toFixed(1) : '';
+                });
 
                 this.histogramaChart = new Chart(canvas, {
                     type: 'bar',
                     data: {
-                        labels,
+                        labels: xLabels,
                         datasets: [
-                            { label:`${indice} — ${fechaLabel}`, data:counts, backgroundColor:colors,
-                              borderColor:colors.map(c=>c.slice(0,-2)), borderWidth:1,
-                              barPercentage:1, categoryPercentage:1 },
-                            { type:'line', label:`Media: ${stats.media.toFixed(3)}`,
-                              data:mediaLine, borderColor:'#ffffff', borderWidth:2.5, borderDash:[7,4],
-                              pointRadius:0, fill:false, tension:0 },
-                            { type:'line', label:`Mediana: ${stats.mediana.toFixed(3)}`,
-                              data:medianaLine, borderColor:'#f5c518', borderWidth:2, borderDash:[4,3],
-                              pointRadius:0, fill:false, tension:0 }
+                            { label: `${indice} — ${fechaLabel}`,
+                              data: allCounts, backgroundColor: colors,
+                              borderColor: colors.map(c => c.slice(0,-2)),
+                              borderWidth: 0.5, barPercentage: 1, categoryPercentage: 1 },
+                            { type: 'line', label: `Media: ${stats.media.toFixed(3)}`,
+                              data: mediaData, borderColor: '#ffffff', borderWidth: 2,
+                              borderDash: [6,4], pointRadius: 0, fill: false, tension: 0 },
+                            { type: 'line', label: `Mediana: ${stats.mediana.toFixed(3)}`,
+                              data: medianaData, borderColor: '#f5c518', borderWidth: 2,
+                              borderDash: [4,3], pointRadius: 0, fill: false, tension: 0 }
                         ]
                     },
                     options: {
-                        responsive:true,
-                        interaction:{mode:'index',intersect:false},
+                        responsive: true,
+                        interaction: { mode: 'index', intersect: false },
                         plugins: {
-                            legend:{labels:{color:'#e8e8e8',font:{size:11},boxWidth:14}},
-                            tooltip:{callbacks:{
-                                title: items => `${indice} ≈ ${items[0].label}`,
-                                label: tooltipLabel
+                            legend: { labels: { color: '#e8e8e8', font: { size: 11 }, boxWidth: 14 } },
+                            tooltip: { callbacks: {
+                                title: items => `${indice} ≈ ${allBins[items[0].dataIndex]?.toFixed(3)}`,
+                                label: item => item.datasetIndex === 0
+                                    ? `Frecuencia: ${(item.raw||0).toFixed(1)}%`
+                                    : item.dataset.label
                             }}
                         },
-                        scales:{
-                            x:{ticks:{color:'#9a9a9a',font:{size:10},maxRotation:0,
-                                      // Show only ticks at round values (-1,-0.8,...,1)
-                                      callback:(val,i,all) => {
-                                          const v = parseFloat(bins[i]);
-                                          const step = (idx.max-idx.min)/10;
-                                          return Math.abs(Math.round(v/step)*step - v) < step*0.15
-                                              ? v.toFixed(1) : null;
-                                      }},
-                               grid:{color:'#2a2a2a'},
-                               title:{display:true,text:`Valor ${indice}`,color:'#9a9a9a',font:{size:12}}},
-                            y:{ticks:{color:'#9a9a9a', callback: yCallback},
-                               grid:{color:'#2a2a2a'},
-                               title:{display:true, text: yLabel, color:'#9a9a9a',font:{size:12}}}
+                        scales: {
+                            x: { ticks: { color: '#9a9a9a', font: { size: 10 }, maxRotation: 0,
+                                          autoSkip: false },
+                                 grid: { color: '#2a2a2a' },
+                                 title: { display: true, text: `Valor ${indice}`,
+                                          color: '#9a9a9a', font: { size: 12 } } },
+                            y: { ticks: { color: '#9a9a9a',
+                                          callback: v => v.toFixed(1) + '%' },
+                                 grid: { color: '#2a2a2a' },
+                                 title: { display: true, text: 'Frecuencia (%)',
+                                          color: '#9a9a9a', font: { size: 12 } } }
                         }
                     }
                 });
-            },
+            },,
 
             // ─── Navegación de tabs ───────────────────────────────────
             switchVegTab(tab) {
