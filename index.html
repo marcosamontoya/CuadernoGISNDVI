@@ -4128,7 +4128,8 @@ function evaluatePixel(s) {
                     },
                     calculations: {
                         default: {
-                            histograms: { default: { nBins: 25, lowEdge: idx.min, highEdge: idx.max } },
+                            // FLOAT32 output requires binWidth (not nBins) to avoid sampleType mismatch
+                            histograms: { default: { binWidth: (idx.max - idx.min) / 25, lowEdge: idx.min, highEdge: idx.max } },
                             statistics:  { default: { percentiles: { k: [5,10,25,50,75,90,95] } } }
                         }
                     }
