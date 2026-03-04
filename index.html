@@ -4030,23 +4030,25 @@
             // Statistics API requires output with id:"default" and bands with id:"B0"
             // This is DIFFERENT from Process API format.
             _getStatsEvalscript(indice) {
-                // Statistics API does NOT support dataMask in output — omit it entirely.
-                // Keep formulas clean: just return the index value directly.
+                // Statistics API REQUIRES dataMask as a SEPARATE OUTPUT (not just input).
+                // docs.sentinel-hub.com/api/latest/api/statistical/#exclude-pixels-from-calculations-datamask-output
+                // Setup must declare two outputs: "default" (index value) + "dataMask".
+                // evaluatePixel must return both.
                 const formulas = {
-                    NDVI:  `var n=s.B08,r=s.B04,d=n+r; return [d>0?(n-r)/d:0];`,
-                    SAVI:  `var n=s.B08,r=s.B04,L=0.5,d=n+r+L; return [d!=0?((n-r)/d)*(1+L):0];`,
-                    EVI:   `var n=s.B08,r=s.B04,b=s.B02,d=n+6*r-7.5*b+1; return [d!=0?2.5*(n-r)/d:0];`,
-                    NDWI:  `var g=s.B03,n=s.B08,d=g+n; return [d>0?(g-n)/d:0];`,
-                    MSAVI: `var n=s.B08,r=s.B04,t=2*n+1; return [(t-Math.sqrt(t*t-8*(n-r)))/2];`,
-                    NDRE:  `var n=s.B08,re=s.B05,d=n+re; return [d>0?(n-re)/d:0];`,
+                    NDVI:  `var n=s.B08,r=s.B04,d=n+r; return { default:[d>0?(n-r)/d:0], dataMask:[s.dataMask] };`,
+                    SAVI:  `var n=s.B08,r=s.B04,L=0.5,d=n+r+L; return { default:[d!=0?((n-r)/d)*(1+L):0], dataMask:[s.dataMask] };`,
+                    EVI:   `var n=s.B08,r=s.B04,b=s.B02,d=n+6*r-7.5*b+1; return { default:[d!=0?2.5*(n-r)/d:0], dataMask:[s.dataMask] };`,
+                    NDWI:  `var g=s.B03,n=s.B08,d=g+n; return { default:[d>0?(g-n)/d:0], dataMask:[s.dataMask] };`,
+                    MSAVI: `var n=s.B08,r=s.B04,t=2*n+1; return { default:[(t-Math.sqrt(t*t-8*(n-r)))/2], dataMask:[s.dataMask] };`,
+                    NDRE:  `var n=s.B08,re=s.B05,d=n+re; return { default:[d>0?(n-re)/d:0], dataMask:[s.dataMask] };`,
                 };
                 const bandSets = {
-                    NDVI:  `["B04","B08"]`,
-                    SAVI:  `["B04","B08"]`,
-                    EVI:   `["B02","B04","B08"]`,
-                    NDWI:  `["B03","B08"]`,
-                    MSAVI: `["B04","B08"]`,
-                    NDRE:  `["B05","B08"]`,
+                    NDVI:  `["B04","B08","dataMask"]`,
+                    SAVI:  `["B04","B08","dataMask"]`,
+                    EVI:   `["B02","B04","B08","dataMask"]`,
+                    NDWI:  `["B03","B08","dataMask"]`,
+                    MSAVI: `["B04","B08","dataMask"]`,
+                    NDRE:  `["B05","B08","dataMask"]`,
                 };
                 const formula = formulas[indice] || formulas.NDVI;
                 const bands   = bandSets[indice]  || bandSets.NDVI;
@@ -4054,7 +4056,10 @@
 function setup() {
   return {
     input: [{ bands: ${bands} }],
-    output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
+    output: [
+      { id: "default",  bands: 1, sampleType: "FLOAT32" },
+      { id: "dataMask", bands: 1, sampleType: "UINT8"   }
+    ]
   };
 }
 function evaluatePixel(s) {
@@ -4094,14 +4099,8 @@ function evaluatePixel(s) {
 
                 // Statistics API requires a different evalscript format than Process API:
                 // output must have id:"default" and bands must have id:"B0"
-                let statsEvalscript = this._getStatsEvalscript(indice);
-                // FAILSAFE: strip any dataMask that would cause HTTP 400
-                statsEvalscript = statsEvalscript
-                    .replace(/,\s*"dataMask"/g, '').replace(/"dataMask"\s*,\s*/g, '')
-                    .replace(/,\s*'dataMask'/g, '').replace(/'dataMask'\s*,\s*/g, '')
-                    .replace(/if\s*\(!s\.dataMask\)\s*return\s*\[NaN\];?\s*/g, '')
-                    .replace(/if\s*\(!s\.dataMask\)\s*return\s*NaN;?\s*/g, '');
-                console.log('[AgroData360 Stats] Evalscript enviado:', statsEvalscript.substring(0,300));
+                const statsEvalscript = this._getStatsEvalscript(indice);
+                console.log('[AgroData360 Stats] Evalscript enviado:', statsEvalscript.substring(0,400));
                 // IMPORTANT: resx/resy for CRS84 must be in DEGREES, not metres.
                 // 1° ≈ 111,000 m. We target 60 m ground resolution → 60/111000 ≈ 0.00054°
                 // This stays well under the 1500 m/px limit while giving adequate pixel density.
