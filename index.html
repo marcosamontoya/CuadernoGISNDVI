@@ -4181,29 +4181,57 @@ function evaluatePixel(s) {
                     throw new Error(`Estructura de respuesta inesperada: ${JSON.stringify(interval).substring(0,200)}`);
                 }
 
-                const st  = banda.statistics?.default ?? banda.statistics ?? {};
-                const pcts = st.percentiles ?? {};
+                // API returns banda.stats (not banda.statistics) in CDSE
+                const st  = banda.stats ?? banda.statistics?.default ?? banda.statistics ?? {};
+                // Normalize percentile keys: API returns "75.0" but code expects 75 or "75"
+                const rawPcts = st.percentiles ?? {};
+                const pcts = {};
+                Object.entries(rawPcts).forEach(([k, v]) => {
+                    const n = parseFloat(k);
+                    pcts[n] = v;           // numeric key: pcts[75]
+                    pcts[String(Math.round(n))] = v;  // string key: pcts['75']
+                });
                 const safeVal = (v, fallback=0) => isNaN(+v) ? fallback : +(+v).toFixed(4);
 
-                // Build histogram client-side from percentiles (avoids API type errors)
-                // Creates a normal-distribution-like histogram using p5/p95 range
-                const buildClientHistogram = (pcts, mean, stdev, vMin, vMax) => {
-                    const lo = safeVal(pcts[5]  ?? pcts['5'],  vMin);
-                    const hi = safeVal(pcts[95] ?? pcts['95'], vMax);
-                    const nBins = 20;
-                    const binW  = (hi - lo) / nBins;
-                    if (binW <= 0) return null;
+                // Build histogram client-side from percentiles
+                // Uses the 7 known percentile breakpoints to derive bin densities
+                const buildClientHistogram = (pcts, mean, vMin, vMax) => {
+                    const p5  = safeVal(pcts[5]  ?? pcts['5'],  vMin);
+                    const p10 = safeVal(pcts[10] ?? pcts['10'], vMin);
+                    const p25 = safeVal(pcts[25] ?? pcts['25'], vMin);
+                    const p50 = safeVal(pcts[50] ?? pcts['50'], mean);
+                    const p75 = safeVal(pcts[75] ?? pcts['75'], vMax);
+                    const p90 = safeVal(pcts[90] ?? pcts['90'], vMax);
+                    const p95 = safeVal(pcts[95] ?? pcts['95'], vMax);
+                    // Build breakpoints: each segment has a known % of data
+                    // [0-p5]=5%, [p5-p10]=5%, [p10-p25]=15%, [p25-p50]=25%,
+                    // [p50-p75]=25%, [p75-p90]=15%, [p90-p95]=5%, [p95+]=5%
+                    const segments = [
+                        { from: vMin, to: p5,  pct: 5  },
+                        { from: p5,  to: p10, pct: 5  },
+                        { from: p10, to: p25, pct: 15 },
+                        { from: p25, to: p50, pct: 25 },
+                        { from: p50, to: p75, pct: 25 },
+                        { from: p75, to: p90, pct: 15 },
+                        { from: p90, to: p95, pct: 5  },
+                        { from: p95, to: vMax, pct: 5 },
+                    ].filter(s => s.to > s.from);
+                    if (!segments.length) return null;
+                    // Expand each segment into fine bins (density = pct / width)
+                    const nBinsPerSeg = 3;
                     const bins = [], counts = [];
-                    for (let i = 0; i < nBins; i++) {
-                        const binMid = lo + (i + 0.5) * binW;
-                        bins.push(+(lo + i * binW).toFixed(3));
-                        // Approximate normal distribution
-                        const z = stdev > 0 ? (binMid - mean) / stdev : 0;
-                        counts.push(Math.max(0, Math.round(1000 * Math.exp(-0.5 * z * z))));
-                    }
-                    return { bins, counts };
+                    segments.forEach(seg => {
+                        const w = (seg.to - seg.from) / nBinsPerSeg;
+                        if (w <= 0) return;
+                        const density = seg.pct / nBinsPerSeg; // % per bin
+                        for (let i = 0; i < nBinsPerSeg; i++) {
+                            bins.push(+(seg.from + i * w).toFixed(3));
+                            counts.push(+density.toFixed(2));
+                        }
+                    });
+                    return { bins, counts, isPercent: true };
                 };
-                const his = null; // Not from API anymore
+                const his = null; // Not from API
 
                 const result = {
                     fuente: 'CDSE / Sentinel Hub Statistics',
@@ -4221,7 +4249,7 @@ function evaluatePixel(s) {
                     percentil95: safeVal(pcts[95] ?? pcts['95']),
                     noData:  st.noDataCount  ?? st.noDataPixelCount ?? 0,
                     pixeles: st.sampleCount  ?? st.validPixelCount  ?? 0,
-                    histogram: buildClientHistogram(pcts, safeVal(st.mean), safeVal(st.stDev), idx.min, idx.max),
+                    histogram: buildClientHistogram(pcts, safeVal(st.mean), idx.min, idx.max),
                     fecha,
                     intervalo: interval.interval
                 };
@@ -4663,8 +4691,7 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                 }
 
                 const {bins, counts} = stats.histogram;
-                const nBins = bins.length;
-                const binSize = nBins > 1 ? bins[1]-bins[0] : (idx.max-idx.min)/25;
+                const isPercent = stats.histogram.isPercent === true;
                 const labels = bins.map(b => b.toFixed(3));
                 const colors = bins.map(b => {
                     const e = idx.escala.find(s => b>=s.rango[0] && b<s.rango[1]) || idx.escala[idx.escala.length-1];
@@ -4675,14 +4702,22 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                     .toLocaleDateString('es-AR',{day:'numeric',month:'short',year:'numeric'});
                 const maxCount = Math.max(...counts);
 
-                // Índice del bin más cercano a media y mediana
+                // Vertical reference lines for media and mediana
                 const findBinIdx = v => {
                     let best=0, bestD=Infinity;
                     bins.forEach((b,i)=>{ const d=Math.abs(b-v); if(d<bestD){bestD=d;best=i;} });
                     return best;
                 };
-                const mediaLine  = bins.map((_,i) => i===findBinIdx(stats.media)   ? maxCount*1.05 : null);
-                const medianaLine = bins.map((_,i) => i===findBinIdx(stats.mediana) ? maxCount*0.85 : null);
+                const mediaLine   = bins.map((_,i) => i===findBinIdx(stats.media)   ? maxCount*1.08 : null);
+                const medianaLine = bins.map((_,i) => i===findBinIdx(stats.mediana) ? maxCount*0.88 : null);
+
+                const yLabel = isPercent ? 'Porcentaje de píxeles (%)' : 'Número de píxeles';
+                const yCallback = isPercent
+                    ? v => v.toFixed(1) + '%'
+                    : v => v >= 1000 ? (v/1000).toFixed(1)+'k' : v;
+                const tooltipLabel = isPercent
+                    ? item => item.datasetIndex===0 ? `Frecuencia: ${(item.raw||0).toFixed(1)}%` : item.dataset.label
+                    : item => item.datasetIndex===0 ? `Píxeles: ${(item.raw||0).toLocaleString('es-AR')}` : item.dataset.label;
 
                 this.histogramaChart = new Chart(canvas, {
                     type: 'bar',
@@ -4693,7 +4728,7 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                               borderColor:colors.map(c=>c.slice(0,-2)), borderWidth:1,
                               barPercentage:1, categoryPercentage:1 },
                             { type:'line', label:`Media: ${stats.media.toFixed(3)}`,
-                              data:mediaLine, borderColor:'#fff', borderWidth:2.5, borderDash:[7,4],
+                              data:mediaLine, borderColor:'#ffffff', borderWidth:2.5, borderDash:[7,4],
                               pointRadius:0, fill:false, tension:0 },
                             { type:'line', label:`Mediana: ${stats.mediana.toFixed(3)}`,
                               data:medianaLine, borderColor:'#f5c518', borderWidth:2, borderDash:[4,3],
@@ -4707,18 +4742,16 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                             legend:{labels:{color:'#e8e8e8',font:{size:11},boxWidth:14}},
                             tooltip:{callbacks:{
                                 title: items => `${indice} ≈ ${items[0].label}`,
-                                label: item => item.datasetIndex===0
-                                    ? `Píxeles: ${(item.raw||0).toLocaleString('es-AR')}`
-                                    : item.dataset.label
+                                label: tooltipLabel
                             }}
                         },
                         scales:{
                             x:{ticks:{color:'#9a9a9a',font:{size:10},maxRotation:45,maxTicksLimit:14},
                                grid:{color:'#2a2a2a'},
                                title:{display:true,text:`Valor ${indice}`,color:'#9a9a9a',font:{size:12}}},
-                            y:{ticks:{color:'#9a9a9a',callback:v=>v>=1000?(v/1000).toFixed(1)+'k':v},
+                            y:{ticks:{color:'#9a9a9a', callback: yCallback},
                                grid:{color:'#2a2a2a'},
-                               title:{display:true,text:'Número de píxeles',color:'#9a9a9a',font:{size:12}}}
+                               title:{display:true, text: yLabel, color:'#9a9a9a',font:{size:12}}}
                         }
                     }
                 });
