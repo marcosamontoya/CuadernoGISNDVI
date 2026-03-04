@@ -4094,7 +4094,14 @@ function evaluatePixel(s) {
 
                 // Statistics API requires a different evalscript format than Process API:
                 // output must have id:"default" and bands must have id:"B0"
-                const statsEvalscript = this._getStatsEvalscript(indice);
+                let statsEvalscript = this._getStatsEvalscript(indice);
+                // FAILSAFE: strip any dataMask that would cause HTTP 400
+                statsEvalscript = statsEvalscript
+                    .replace(/,\s*"dataMask"/g, '').replace(/"dataMask"\s*,\s*/g, '')
+                    .replace(/,\s*'dataMask'/g, '').replace(/'dataMask'\s*,\s*/g, '')
+                    .replace(/if\s*\(!s\.dataMask\)\s*return\s*\[NaN\];?\s*/g, '')
+                    .replace(/if\s*\(!s\.dataMask\)\s*return\s*NaN;?\s*/g, '');
+                console.log('[AgroData360 Stats] Evalscript enviado:', statsEvalscript.substring(0,300));
                 // IMPORTANT: resx/resy for CRS84 must be in DEGREES, not metres.
                 // 1° ≈ 111,000 m. We target 60 m ground resolution → 60/111000 ≈ 0.00054°
                 // This stays well under the 1500 m/px limit while giving adequate pixel density.
@@ -4128,7 +4135,7 @@ function evaluatePixel(s) {
                     }
                 };
 
-                console.log('Statistics API body (t0→t1):', t0, '→', t1);
+                console.log('[AgroData360 Stats] body completo:', JSON.stringify(body, null, 2).substring(0, 800));
                 const resp = await fetch('https://sh.dataspace.copernicus.eu/api/v1/statistics', {
                     method: 'POST',
                     headers: { 'Content-Type':'application/json', 'Authorization':`Bearer ${token}` },
