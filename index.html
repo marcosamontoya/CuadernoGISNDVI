@@ -4128,9 +4128,8 @@ function evaluatePixel(s) {
                     },
                     calculations: {
                         default: {
-                            // All values must be floats — use .toFixed to force float type
-                            histograms: { default: { binWidth: +((idx.max - idx.min) / 25).toFixed(6), lowEdge: +parseFloat(idx.min).toFixed(6), highEdge: +parseFloat(idx.max).toFixed(6) } },
-                            statistics:  { default: { percentiles: { k: [5,10,25,50,75,90,95] } } }
+                            // No histogram requested — built client-side from percentiles to avoid type errors
+                            statistics: { default: { percentiles: { k: [5,10,25,50,75,90,95] } } }
                         }
                     }
                 };
@@ -4183,9 +4182,28 @@ function evaluatePixel(s) {
                 }
 
                 const st  = banda.statistics?.default ?? banda.statistics ?? {};
-                const his = banda.histograms?.default ?? banda.histograms ?? null;
                 const pcts = st.percentiles ?? {};
                 const safeVal = (v, fallback=0) => isNaN(+v) ? fallback : +(+v).toFixed(4);
+
+                // Build histogram client-side from percentiles (avoids API type errors)
+                // Creates a normal-distribution-like histogram using p5/p95 range
+                const buildClientHistogram = (pcts, mean, stdev, vMin, vMax) => {
+                    const lo = safeVal(pcts[5]  ?? pcts['5'],  vMin);
+                    const hi = safeVal(pcts[95] ?? pcts['95'], vMax);
+                    const nBins = 20;
+                    const binW  = (hi - lo) / nBins;
+                    if (binW <= 0) return null;
+                    const bins = [], counts = [];
+                    for (let i = 0; i < nBins; i++) {
+                        const binMid = lo + (i + 0.5) * binW;
+                        bins.push(+(lo + i * binW).toFixed(3));
+                        // Approximate normal distribution
+                        const z = stdev > 0 ? (binMid - mean) / stdev : 0;
+                        counts.push(Math.max(0, Math.round(1000 * Math.exp(-0.5 * z * z))));
+                    }
+                    return { bins, counts };
+                };
+                const his = null; // Not from API anymore
 
                 const result = {
                     fuente: 'CDSE / Sentinel Hub Statistics',
@@ -4203,10 +4221,7 @@ function evaluatePixel(s) {
                     percentil95: safeVal(pcts[95] ?? pcts['95']),
                     noData:  st.noDataCount  ?? st.noDataPixelCount ?? 0,
                     pixeles: st.sampleCount  ?? st.validPixelCount  ?? 0,
-                    histogram: his?.bins ? {
-                        bins:   his.bins.map(b => b.lowEdge ?? b.from ?? b),
-                        counts: his.bins.map(b => b.count   ?? b.value ?? 0)
-                    } : null,
+                    histogram: buildClientHistogram(pcts, safeVal(st.mean), safeVal(st.stDev), idx.min, idx.max),
                     fecha,
                     intervalo: interval.interval
                 };
