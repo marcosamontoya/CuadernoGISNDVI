@@ -4223,37 +4223,43 @@ function evaluatePixel(s) {
                 // Each inter-percentile segment holds a known % of observations.
                 // Density per bin = segment_pct / segment_width  →  bar height = % of pixels
                 const buildHistogram = () => {
-                    const mean = +st.mean;
-                    // Always span the full index range (e.g. -1 to 1 for NDVI)
-                    // Data points outside this range get 0 height (padding bins)
-                    const vMin = idx.min, vMax = idx.max;
-                    const dataMin = +st.min, dataMax = +st.max;
-                    // Breakpoints in order: idx.min, p5, p10, p25, p50, p75, p90, p95, idx.max
-                    const pts = [
-                        { v: vMin,           cumPct: 0   },  // idx.min (e.g. -1)
-                        { v: p[5]  ?? dataMin, cumPct: 5   },
-                        { v: p[10] ?? dataMin, cumPct: 10  },
-                        { v: p[25] ?? dataMin, cumPct: 25  },
-                        { v: p[50] ?? mean,    cumPct: 50  },
-                        { v: p[75] ?? dataMax, cumPct: 75  },
-                        { v: p[90] ?? dataMax, cumPct: 90  },
-                        { v: p[95] ?? dataMax, cumPct: 95  },
-                        { v: vMax,           cumPct: 100 },  // idx.max (e.g. 1)
-                    ];
+                    // Fixed bins: always -1 to 1, width 0.1 each (20 bins total)
+                    const BIN_W = 0.1;
                     const bins = [], counts = [];
-                    const BINS_PER_SEG = 4; // finer bins per segment
-                    for (let s = 0; s < pts.length - 1; s++) {
-                        const segFrom  = pts[s].v,   segTo  = pts[s+1].v;
-                        const segPct   = pts[s+1].cumPct - pts[s].cumPct; // % in this segment
-                        const segW     = segTo - segFrom;
-                        if (segW <= 0) continue;
-                        const binW = segW / BINS_PER_SEG;
-                        const binPct = segPct / BINS_PER_SEG; // % per bin
-                        for (let b = 0; b < BINS_PER_SEG; b++) {
-                            bins.push(+(segFrom + b * binW).toFixed(4));
-                            counts.push(+binPct.toFixed(2));
-                        }
+                    for (let i = 0; i < 20; i++) {
+                        bins.push(+(-1 + i * BIN_W).toFixed(1));
+                        counts.push(0);
                     }
+                    // Distribute percentile-defined % into the fixed bins
+                    // Breakpoints with cumulative % known from API percentiles
+                    const pts = [
+                        { v: +st.min,      cum: 0   },
+                        { v: p[5]  ?? +st.min, cum: 5   },
+                        { v: p[10] ?? +st.min, cum: 10  },
+                        { v: p[25] ?? +st.mean, cum: 25  },
+                        { v: p[50] ?? +st.mean, cum: 50  },
+                        { v: p[75] ?? +st.max,  cum: 75  },
+                        { v: p[90] ?? +st.max,  cum: 90  },
+                        { v: p[95] ?? +st.max,  cum: 95  },
+                        { v: +st.max,      cum: 100 },
+                    ];
+                    // For each fixed bin, integrate the density function
+                    bins.forEach((binStart, i) => {
+                        const binEnd = binStart + BIN_W;
+                        let pct = 0;
+                        for (let s = 0; s < pts.length - 1; s++) {
+                            const segFrom = pts[s].v, segTo = pts[s+1].v;
+                            const segPct  = pts[s+1].cum - pts[s].cum;
+                            if (segTo <= segFrom) continue;
+                            // Overlap between [binStart,binEnd] and [segFrom,segTo]
+                            const overlapStart = Math.max(binStart, segFrom);
+                            const overlapEnd   = Math.min(binEnd,   segTo);
+                            if (overlapEnd > overlapStart) {
+                                pct += segPct * (overlapEnd - overlapStart) / (segTo - segFrom);
+                            }
+                        }
+                        counts[i] = +pct.toFixed(2);
+                    });
                     return { bins, counts, isPercent: true };
                 };
 
@@ -4716,19 +4722,9 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                     return;
                 }
 
-                // ── Pad bins to always span idx.min → idx.max (e.g. -1 to 1) ──
-                const step = h.bins.length > 1 ? h.bins[1] - h.bins[0] : 0.05;
-                const allBins = [], allCounts = [];
-                // Leading zeros from idx.min to first real bin
-                for (let v = idx.min; v < h.bins[0] - step * 0.5; v = +(v + step).toFixed(4)) {
-                    allBins.push(+v.toFixed(4)); allCounts.push(0);
-                }
-                h.bins.forEach((b, i) => { allBins.push(b); allCounts.push(h.counts[i]); });
-                // Trailing zeros from last real bin to idx.max
-                const lastBin = allBins[allBins.length - 1];
-                for (let v = +(lastBin + step).toFixed(4); v <= idx.max + step * 0.5; v = +(v + step).toFixed(4)) {
-                    allBins.push(+v.toFixed(4)); allCounts.push(0);
-                }
+                // Bins are already fixed -1 to 1 in steps of 0.1
+                const allBins = h.bins;
+                const allCounts = h.counts;
 
                 const fechaLabel = new Date(fecha + 'T12:00:00Z')
                     .toLocaleDateString('es-AR', {day:'numeric', month:'short', year:'numeric'});
@@ -4746,12 +4742,8 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                 const mediaData  = allBins.map((_, i) => i === nearestIdx(stats.media)   ? maxH * 1.1 : null);
                 const medianaData = allBins.map((_, i) => i === nearestIdx(stats.mediana) ? maxH * 0.9 : null);
 
-                // X ticks: show every 0.2 (or appropriate step for non-NDVI indices)
-                const tickStep = (idx.max - idx.min) / 10;
-                const xLabels = allBins.map(b => {
-                    const distToRound = Math.abs(b - Math.round(b / tickStep) * tickStep);
-                    return distToRound < step * 0.6 ? b.toFixed(1) : '';
-                });
+                // Fixed labels: every bin gets its value shown (bins are 0.1 wide)
+                const xLabels = allBins.map(b => b.toFixed(1));
 
                 this.histogramaChart = new Chart(canvas, {
                     type: 'bar',
