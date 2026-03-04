@@ -4181,78 +4181,70 @@ function evaluatePixel(s) {
                     throw new Error(`Estructura de respuesta inesperada: ${JSON.stringify(interval).substring(0,200)}`);
                 }
 
-                // API returns banda.stats (not banda.statistics) in CDSE
-                const st  = banda.stats ?? banda.statistics?.default ?? banda.statistics ?? {};
-                // Normalize percentile keys: API returns "75.0" but code expects 75 or "75"
-                const rawPcts = st.percentiles ?? {};
-                const pcts = {};
-                Object.entries(rawPcts).forEach(([k, v]) => {
-                    const n = parseFloat(k);
-                    pcts[n] = v;           // numeric key: pcts[75]
-                    pcts[String(Math.round(n))] = v;  // string key: pcts['75']
-                });
-                const safeVal = (v, fallback=0) => isNaN(+v) ? fallback : +(+v).toFixed(4);
+                // Parse stats — CDSE returns banda.stats with percentiles keyed as "75.0"
+                const st = banda.stats ?? banda.statistics?.default ?? banda.statistics ?? {};
+                // Normalize percentile keys: "75.0" → numeric 75
+                const p = {};
+                Object.entries(st.percentiles ?? {}).forEach(([k, v]) => { p[Math.round(parseFloat(k))] = +v; });
 
-                // Build histogram client-side from percentiles
-                // Uses the 7 known percentile breakpoints to derive bin densities
-                const buildClientHistogram = (pcts, mean, vMin, vMax) => {
-                    const p5  = safeVal(pcts[5]  ?? pcts['5'],  vMin);
-                    const p10 = safeVal(pcts[10] ?? pcts['10'], vMin);
-                    const p25 = safeVal(pcts[25] ?? pcts['25'], vMin);
-                    const p50 = safeVal(pcts[50] ?? pcts['50'], mean);
-                    const p75 = safeVal(pcts[75] ?? pcts['75'], vMax);
-                    const p90 = safeVal(pcts[90] ?? pcts['90'], vMax);
-                    const p95 = safeVal(pcts[95] ?? pcts['95'], vMax);
-                    // Build breakpoints: each segment has a known % of data
-                    // [0-p5]=5%, [p5-p10]=5%, [p10-p25]=15%, [p25-p50]=25%,
-                    // [p50-p75]=25%, [p75-p90]=15%, [p90-p95]=5%, [p95+]=5%
-                    const segments = [
-                        { from: vMin, to: p5,  pct: 5  },
-                        { from: p5,  to: p10, pct: 5  },
-                        { from: p10, to: p25, pct: 15 },
-                        { from: p25, to: p50, pct: 25 },
-                        { from: p50, to: p75, pct: 25 },
-                        { from: p75, to: p90, pct: 15 },
-                        { from: p90, to: p95, pct: 5  },
-                        { from: p95, to: vMax, pct: 5 },
-                    ].filter(s => s.to > s.from);
-                    if (!segments.length) return null;
-                    // Expand each segment into fine bins (density = pct / width)
-                    const nBinsPerSeg = 3;
+                const safeVal = (v, fallback=0) => (v == null || isNaN(+v)) ? fallback : +(+v).toFixed(4);
+
+                // Build histogram from 7 percentile breakpoints.
+                // Each inter-percentile segment holds a known % of observations.
+                // Density per bin = segment_pct / segment_width  →  bar height = % of pixels
+                const buildHistogram = () => {
+                    const mean = +st.mean;
+                    const vMin = +st.min, vMax = +st.max;
+                    // Breakpoints in order: min, p5, p10, p25, p50, p75, p90, p95, max
+                    const pts = [
+                        { v: vMin,      cumPct: 0   },
+                        { v: p[5]  ?? vMin, cumPct: 5   },
+                        { v: p[10] ?? vMin, cumPct: 10  },
+                        { v: p[25] ?? vMin, cumPct: 25  },
+                        { v: p[50] ?? mean, cumPct: 50  },
+                        { v: p[75] ?? vMax, cumPct: 75  },
+                        { v: p[90] ?? vMax, cumPct: 90  },
+                        { v: p[95] ?? vMax, cumPct: 95  },
+                        { v: vMax,      cumPct: 100 },
+                    ];
                     const bins = [], counts = [];
-                    segments.forEach(seg => {
-                        const w = (seg.to - seg.from) / nBinsPerSeg;
-                        if (w <= 0) return;
-                        const density = seg.pct / nBinsPerSeg; // % per bin
-                        for (let i = 0; i < nBinsPerSeg; i++) {
-                            bins.push(+(seg.from + i * w).toFixed(3));
-                            counts.push(+density.toFixed(2));
+                    const BINS_PER_SEG = 4; // finer bins per segment
+                    for (let s = 0; s < pts.length - 1; s++) {
+                        const segFrom  = pts[s].v,   segTo  = pts[s+1].v;
+                        const segPct   = pts[s+1].cumPct - pts[s].cumPct; // % in this segment
+                        const segW     = segTo - segFrom;
+                        if (segW <= 0) continue;
+                        const binW = segW / BINS_PER_SEG;
+                        const binPct = segPct / BINS_PER_SEG; // % per bin
+                        for (let b = 0; b < BINS_PER_SEG; b++) {
+                            bins.push(+(segFrom + b * binW).toFixed(4));
+                            counts.push(+binPct.toFixed(2));
                         }
-                    });
+                    }
                     return { bins, counts, isPercent: true };
                 };
-                const his = null; // Not from API
 
                 const result = {
                     fuente: 'CDSE / Sentinel Hub Statistics',
                     simulada: false,
-                    media:       safeVal(st.mean),
-                    min:         safeVal(st.min),
-                    max:         safeVal(st.max),
-                    desvio:      safeVal(st.stDev),
-                    mediana:     safeVal(pcts[50] ?? pcts['50'] ?? st.mean),
-                    percentil5:  safeVal(pcts[5]  ?? pcts['5']),
-                    percentil10: safeVal(pcts[10] ?? pcts['10']),
-                    percentil25: safeVal(pcts[25] ?? pcts['25']),
-                    percentil75: safeVal(pcts[75] ?? pcts['75']),
-                    percentil90: safeVal(pcts[90] ?? pcts['90']),
-                    percentil95: safeVal(pcts[95] ?? pcts['95']),
+                    media:      safeVal(st.mean),
+                    min:        safeVal(st.min),
+                    max:        safeVal(st.max),
+                    desvio:     safeVal(st.stDev),
+                    mediana:    safeVal(p[50] ?? st.mean),
+                    percentil5:  safeVal(p[5]),
+                    percentil10: safeVal(p[10]),
+                    percentil25: safeVal(p[25]),
+                    percentil75: safeVal(p[75]),
+                    percentil90: safeVal(p[90]),
+                    percentil95: safeVal(p[95]),
                     noData:  st.noDataCount  ?? st.noDataPixelCount ?? 0,
                     pixeles: st.sampleCount  ?? st.validPixelCount  ?? 0,
-                    histogram: buildClientHistogram(pcts, safeVal(st.mean), idx.min, idx.max),
+                    histogram: buildHistogram(),
                     fecha,
                     intervalo: interval.interval
                 };
+
                 this.cacheStats[key] = result;
                 return result;
             },
