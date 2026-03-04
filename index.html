@@ -4738,7 +4738,9 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                             }}
                         },
                         scales:{
-                            x:{ticks:{color:'#9a9a9a',font:{size:10},maxRotation:45,maxTicksLimit:14},
+                            x:{type:'linear', min: idx.min, max: idx.max,
+                               ticks:{color:'#9a9a9a',font:{size:10},maxRotation:0,maxTicksLimit:11,
+                                      stepSize:(idx.max-idx.min)/10},
                                grid:{color:'#2a2a2a'},
                                title:{display:true,text:`Valor ${indice}`,color:'#9a9a9a',font:{size:12}}},
                             y:{ticks:{color:'#9a9a9a', callback: yCallback},
