@@ -1505,11 +1505,11 @@
                                         <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem; margin-bottom:0.5rem;">
                                             <div>
                                                 <label style="font-size:0.75rem; color:var(--text-secondary);">Desde</label>
-                                                <input type="date" id="vegRangoDesde" class="form-input" style="font-size:0.82rem; padding:0.4rem 0.6rem;">
+                                                <input type="text" id="vegRangoDesde" class="form-input" placeholder="dd/mm/aaaa" maxlength="10" style="font-size:0.82rem; padding:0.4rem 0.6rem;" oninput="vegModule._maskDate(this)">
                                             </div>
                                             <div>
                                                 <label style="font-size:0.75rem; color:var(--text-secondary);">Hasta</label>
-                                                <input type="date" id="vegRangoHasta" class="form-input" style="font-size:0.82rem; padding:0.4rem 0.6rem;">
+                                                <input type="text" id="vegRangoHasta" class="form-input" placeholder="dd/mm/aaaa" maxlength="10" style="font-size:0.82rem; padding:0.4rem 0.6rem;" oninput="vegModule._maskDate(this)">
                                             </div>
                                         </div>
                                         <button class="btn btn-small btn-primary" style="width:100%;" onclick="vegModule.buscarFechasEnRango()">🔍 Buscar en rango</button>
@@ -3925,16 +3925,31 @@
                 await this._fetchFechas(bbox, nubosidad, fechaIni, fechaFin, 5);
             },
 
+            _maskDate(input) {
+                // Auto-format as dd/mm/aaaa while typing
+                let v = input.value.replace(/\D/g, '');
+                if (v.length > 2) v = v.slice(0,2) + '/' + v.slice(2);
+                if (v.length > 5) v = v.slice(0,5) + '/' + v.slice(5,9);
+                input.value = v;
+            },
+
+            _parseDMY(str) {
+                const m = (str||'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                if (!m) return null;
+                return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+            },
+
             async buscarFechasEnRango() {
                 if (!this.cuartelActual) return;
                 const bbox = this.getCuartelBbox(this.cuartelActual);
-                const desde = document.getElementById('vegRangoDesde').value;
-                const hasta = document.getElementById('vegRangoHasta').value;
-                if (!desde || !hasta) { this.alertaVeg('Seleccioná fecha desde y hasta', 'error'); return; }
+                const desdeISO = this._parseDMY(document.getElementById('vegRangoDesde').value);
+                const hastaISO = this._parseDMY(document.getElementById('vegRangoHasta').value);
+                if (!desdeISO || !hastaISO) {
+                    this.alertaVeg('Ingresá fechas válidas en formato dd/mm/aaaa', 'error');
+                    return;
+                }
                 const nubosidad = parseInt(document.getElementById('vegNubosidad').value);
-                const t0 = desde + 'T00:00:00Z';
-                const t1 = hasta + 'T23:59:59Z';
-                await this._fetchFechas(bbox, nubosidad, t0, t1, 100);
+                await this._fetchFechas(bbox, nubosidad, desdeISO + 'T00:00:00Z', hastaISO + 'T23:59:59Z', 100);
             },
 
             toggleMasFechas() {
@@ -3945,8 +3960,10 @@
                     // Default range: last year
                     const hoy = new Date();
                     const hace1year = new Date(Date.now() - 365*24*3600*1000);
-                    document.getElementById('vegRangoHasta').value = hoy.toISOString().split('T')[0];
-                    document.getElementById('vegRangoDesde').value = hace1year.toISOString().split('T')[0];
+                    // Format as dd/mm/aaaa for text inputs
+                    const fmtDMY = d => `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+                    document.getElementById('vegRangoHasta').value = fmtDMY(hoy);
+                    document.getElementById('vegRangoDesde').value = fmtDMY(hace1year);
                 }
             },
 
@@ -4194,18 +4211,21 @@ function evaluatePixel(s) {
                 // Density per bin = segment_pct / segment_width  →  bar height = % of pixels
                 const buildHistogram = () => {
                     const mean = +st.mean;
-                    const vMin = +st.min, vMax = +st.max;
-                    // Breakpoints in order: min, p5, p10, p25, p50, p75, p90, p95, max
+                    // Always span the full index range (e.g. -1 to 1 for NDVI)
+                    // Data points outside this range get 0 height (padding bins)
+                    const vMin = idx.min, vMax = idx.max;
+                    const dataMin = +st.min, dataMax = +st.max;
+                    // Breakpoints in order: idx.min, p5, p10, p25, p50, p75, p90, p95, idx.max
                     const pts = [
-                        { v: vMin,      cumPct: 0   },
-                        { v: p[5]  ?? vMin, cumPct: 5   },
-                        { v: p[10] ?? vMin, cumPct: 10  },
-                        { v: p[25] ?? vMin, cumPct: 25  },
-                        { v: p[50] ?? mean, cumPct: 50  },
-                        { v: p[75] ?? vMax, cumPct: 75  },
-                        { v: p[90] ?? vMax, cumPct: 90  },
-                        { v: p[95] ?? vMax, cumPct: 95  },
-                        { v: vMax,      cumPct: 100 },
+                        { v: vMin,           cumPct: 0   },  // idx.min (e.g. -1)
+                        { v: p[5]  ?? dataMin, cumPct: 5   },
+                        { v: p[10] ?? dataMin, cumPct: 10  },
+                        { v: p[25] ?? dataMin, cumPct: 25  },
+                        { v: p[50] ?? mean,    cumPct: 50  },
+                        { v: p[75] ?? dataMax, cumPct: 75  },
+                        { v: p[90] ?? dataMax, cumPct: 90  },
+                        { v: p[95] ?? dataMax, cumPct: 95  },
+                        { v: vMax,           cumPct: 100 },  // idx.max (e.g. 1)
                     ];
                     const bins = [], counts = [];
                     const BINS_PER_SEG = 4; // finer bins per segment
@@ -4738,9 +4758,14 @@ function evaluatePixel(s){return[Math.min(1,s.B11*3),Math.min(1,s.B8A*2.5),Math.
                             }}
                         },
                         scales:{
-                            x:{type:'linear', min: idx.min, max: idx.max,
-                               ticks:{color:'#9a9a9a',font:{size:10},maxRotation:0,maxTicksLimit:11,
-                                      stepSize:(idx.max-idx.min)/10},
+                            x:{ticks:{color:'#9a9a9a',font:{size:10},maxRotation:0,
+                                      // Show only ticks at round values (-1,-0.8,...,1)
+                                      callback:(val,i,all) => {
+                                          const v = parseFloat(bins[i]);
+                                          const step = (idx.max-idx.min)/10;
+                                          return Math.abs(Math.round(v/step)*step - v) < step*0.15
+                                              ? v.toFixed(1) : null;
+                                      }},
                                grid:{color:'#2a2a2a'},
                                title:{display:true,text:`Valor ${indice}`,color:'#9a9a9a',font:{size:12}}},
                             y:{ticks:{color:'#9a9a9a', callback: yCallback},
